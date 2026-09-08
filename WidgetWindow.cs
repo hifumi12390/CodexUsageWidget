@@ -12,7 +12,7 @@ using Microsoft.Win32;
 
 namespace CodexUsageWidget;
 
-public sealed class WidgetWindow : Window
+public sealed partial class WidgetWindow : Window
 {
     readonly SettingsStore store;
     internal readonly Settings Preferences;
@@ -20,7 +20,7 @@ public sealed class WidgetWindow : Window
     readonly CancellationTokenSource lifetime = new();
     readonly DispatcherTimer refreshTimer = new() { Interval = TimeSpan.FromMinutes(5) };
     readonly DispatcherTimer saveTimer = new() { Interval = TimeSpan.FromMilliseconds(450) };
-    readonly DispatcherTimer clockTimer = new() { Interval = TimeSpan.FromSeconds(30) };
+    readonly DispatcherTimer clockTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     readonly StackPanel rows = new();
     readonly TextBlock status = new();
     readonly TextBlock pin = new();
@@ -43,6 +43,8 @@ public sealed class WidgetWindow : Window
     bool ready, closed;
     int failures;
     DateTimeOffset lastAttempt = DateTimeOffset.MinValue;
+    DateTimeOffset nextRefresh;
+    internal TimeSpan ScheduledUsageDelay => refreshTimer.Interval;
     readonly bool testing;
     TrayIcon? tray;
     HwndSource? windowSource;
@@ -56,12 +58,14 @@ public sealed class WidgetWindow : Window
     Brush ColorResource(string key) => (Brush)Application.Current.Resources[key];
     static SolidColorBrush Brush(string value) => (SolidColorBrush)new BrushConverter().ConvertFromString(value)!;
 
-    public WidgetWindow(SettingsStore store, IUsageProvider? provider = null, bool testing = false)
+    public WidgetWindow(SettingsStore store, IUsageProvider? provider = null, bool testing = false, IServerStatusProvider? serverProvider = null)
     {
         this.store = store; this.testing = testing; Preferences = store.Load();
         LightTheme = Appearance.IsLight(Preferences.Theme, Appearance.SystemIsLight());
         Appearance.Apply(Application.Current.Resources, LightTheme);
         this.provider = provider ?? new CodexProvider(() => Preferences.CodexPath);
+        this.serverProvider = serverProvider ?? new OpenAiStatusProvider();
+        refreshTimer.Interval = TimeSpan.FromSeconds(Preferences.RefreshSeconds);
         Title = "Codex Usage Widget";
         ShowActivated = !testing;
         ShowInTaskbar = false;
@@ -98,7 +102,9 @@ public sealed class WidgetWindow : Window
         actions.Children.Add(MakeButton("⋯", "設定メニュー (右クリック)", () => { ContextMenu.PlacementTarget = this; ContextMenu.Placement = PlacementMode.MousePoint; ContextMenu.IsOpen = true; }));
         actions.Children.Add(MakeButton("×", "終了", Close));
         Grid.SetColumn(actions, 1); header.Children.Add(actions); layout.Children.Add(header);
-        var scroll = new ScrollViewer { Content = rows, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Padding = new Thickness(0, 0, 3, 0) };
+        var sections = new StackPanel(); sections.Children.Add(rows);
+        InitializeServerSection(sections);
+        var scroll = new ScrollViewer { Content = sections, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Padding = new Thickness(0, 0, 3, 0) };
         Grid.SetRow(scroll, 1); layout.Children.Add(scroll);
         status.Foreground = Muted; status.FontSize = 10; status.TextWrapping = TextWrapping.Wrap; status.Margin = new Thickness(0, 10, 5, 0);
         Grid.SetRow(status, 2); layout.Children.Add(status);
@@ -108,6 +114,7 @@ public sealed class WidgetWindow : Window
         ContextMenu = new ContextMenu { FontFamily = FontFamily, FontSize = 12 };
         refreshMenu = Item("今すぐ更新    F5", async () => await RefreshAsync());
         ContextMenu.Items.Add(refreshMenu); ContextMenu.Items.Add(new Separator());
+        AddRefreshSettings();
         Toggle("5h", "5h を表示", () => Preferences.ShowFiveHour, v => Preferences.ShowFiveHour = v);
         Toggle("Week", "Week を表示", () => Preferences.ShowWeek, v => Preferences.ShowWeek = v);
         Toggle("Reset", "Reset時刻を表示", () => Preferences.ShowReset, v => Preferences.ShowReset = v);
@@ -135,16 +142,16 @@ public sealed class WidgetWindow : Window
         connection.Items.Add(Item("codex.exe を選択…", () => { var d = new OpenFileDialog { Title = "Codex実行ファイルを選択", Filter = "Codex executable|codex.exe", CheckFileExists = true }; if (d.ShowDialog(this) == true) { Preferences.CodexPath = d.FileName; Snapshot = null; Persist(); _ = RefreshAsync(); } }));
         connection.Items.Add(Item("実行ファイルを自動検出", () => { Preferences.CodexPath = null; Snapshot = null; Persist(); _ = RefreshAsync(); }));
         ContextMenu.Items.Add(connection);
-        ContextMenu.Items.Add(Item("このアプリについて", () => MessageBox.Show(this, "Codex Usage Widget 1.2\n\nバーを左クリックすると使用率／残量を切り替えます。\n5hとWeekの表示モードは個別に保存します。\nテーマ: ダーク／ライト／システムと同期。\n5分ごとに自動更新。失敗時は最大30分まで間隔を延長します。\nResetはWindowsの現地時刻です。\nCreditsは追加利用残高で、利用枠リセット券とは別です。\n\n上部をドラッグして移動、端をドラッグしてリサイズ。\n右クリックまたは Shift+F10 で設定。\n\nログイン済みのCodexが必要です。認証管理はCodexに任せ、ウィジェットは認証情報を保存しません。\n\n設定: " + store.FilePath, "Codex Usage Widget", MessageBoxButton.OK, MessageBoxImage.Information)));
+        ContextMenu.Items.Add(Item("このアプリについて", () => MessageBox.Show(this, "Codex Usage Widget 1.3\n\nバーを左クリックすると使用率／残量を切り替えます。\n5hとWeekの表示モードは個別に保存します。\nテーマ: ダーク／ライト／システムと同期。\n設定した間隔で自動更新。最短15秒の高速更新に対応。失敗時は最大30分まで間隔を延長します。\nResetはWindowsの現地時刻です。\nCreditsは追加利用残高で、利用枠リセット券とは別です。\n\n上部をドラッグして移動、端をドラッグしてリサイズ。\n右クリックまたは Shift+F10 で設定。\n\nログイン済みのCodexが必要です。認証管理はCodexに任せ、ウィジェットは認証情報を保存しません。\n\n設定: " + store.FilePath, "Codex Usage Widget", MessageBoxButton.OK, MessageBoxImage.Information)));
         ContextMenu.Items.Add(new Separator());
         ContextMenu.Items.Add(Item("ウィジェットを隠す", HideToTray));
         ContextMenu.Items.Add(Item("終了", Close));
         KeyDown += async (_, e) => { if (e.Key == Key.F5) { e.Handled = true; await RefreshAsync(); } };
         saveTimer.Tick += (_, _) => { saveTimer.Stop(); Persist(); };
-        refreshTimer.Tick += async (_, _) => await RefreshAsync();
-        clockTimer.Tick += (_, _) => Render();
+        refreshTimer.Tick += async (_, _) => await RefreshAsync(false);
+        clockTimer.Tick += (_, _) => UpdateUsageStatus();
         LocationChanged += (_, _) => QueueSave();
-        SizeChanged += (_, _) => { surface.Clip = new RectangleGeometry(new Rect(0, 0, ActualWidth, ActualHeight), 15, 15); QueueSave(); };
+        SizeChanged += (_, e) => { surface.Clip = new RectangleGeometry(new Rect(0, 0, ActualWidth, ActualHeight), 15, 15); RememberServerSize(); if (e.WidthChanged) QueueServerResize(); QueueSave(); };
         SourceInitialized += (_, _) =>
         {
             windowSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
@@ -152,9 +159,9 @@ public sealed class WidgetWindow : Window
             if (!testing && windowSource != null) tray = new TrayIcon(windowSource, RestoreFromTray, OpenTrayMenu);
             KeepOnScreen(); ApplyBackground();
         };
-        Loaded += async (_, _) => { ready = true; QueueBackdrop(); Render(); if (!testing) { Persist(); refreshTimer.Start(); clockTimer.Start(); await RefreshAsync(); } };
+        Loaded += async (_, _) => { ready = true; QueueBackdrop(); Render(); if (!testing) { Persist(); clockTimer.Start(); await RefreshAsync(); } };
         StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) HideToTray(); };
-        Closing += (_, _) => { Persist(); closed = true; lifetime.Cancel(); refreshTimer.Stop(); clockTimer.Stop(); saveTimer.Stop(); };
+        Closing += (_, _) => { Persist(); closed = true; lifetime.Cancel(); refreshTimer.Stop(); serverTimer.Stop(); clockTimer.Stop(); saveTimer.Stop(); };
         SystemEvents.DisplaySettingsChanged += DisplayChanged;
         SystemEvents.UserPreferenceChanged += SystemThemeChanged;
         Activated += (_, _) => { if (Preferences.Theme == "System") RefreshSystemTheme(); QueueBackdrop(); };
@@ -275,9 +282,11 @@ public sealed class WidgetWindow : Window
         imageMenu.IsEnabled = Preferences.BackgroundImage != null;
         Render();
     }
-    internal async Task RefreshAsync()
+    internal async Task RefreshAsync(bool manual = true)
     {
+        if (!testing) _ = RefreshServerAsync(manual);
         if (Busy || closed || (!testing && DateTimeOffset.Now - lastAttempt < TimeSpan.FromSeconds(10))) return;
+        refreshTimer.Stop();
         lastAttempt = DateTimeOffset.Now; Busy = true; refresh.IsEnabled = false; refreshMenu.IsEnabled = false; Render();
         try { Snapshot = await provider.ReadAsync(lifetime.Token); failure = null; failures = 0; ProcessAlerts(Snapshot); }
         catch (OperationCanceledException) when (closed) { }
@@ -288,7 +297,8 @@ public sealed class WidgetWindow : Window
             if (!closed)
             {
                 refresh.IsEnabled = true; refreshMenu.IsEnabled = true;
-                refreshTimer.Interval = TimeSpan.FromMinutes(Math.Min(30, 5 * Math.Pow(2, Math.Min(3, failures))));
+                refreshTimer.Interval = RefreshPolicy.Delay(Preferences.RefreshSeconds, failures);
+                nextRefresh = DateTimeOffset.Now + refreshTimer.Interval;
                 if (!testing) { refreshTimer.Stop(); refreshTimer.Start(); }
                 Render();
             }
@@ -313,9 +323,15 @@ public sealed class WidgetWindow : Window
             rows.Children.Add(credit);
         }
         if (rows.Children.Count == 0) rows.Children.Add(new TextBlock { Text = "表示項目を右クリックで選択", Foreground = Muted, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 12) });
-        var age = Snapshot == null ? "未取得" : "更新 " + Snapshot.FetchedAt.ToLocalTime().ToString("HH:mm");
-        status.Text = Busy ? "更新中…" : failure != null ? failure + (Snapshot != null ? "\n前回値 · " + age : "") : age + "  ·  自動更新 5分";
-        if (Snapshot != null && failure == null && DateTimeOffset.Now - Snapshot.FetchedAt > TimeSpan.FromMinutes(7)) status.Text += "  ·  前回値";
+        RenderServerStatus();
+        UpdateUsageStatus();
+    }
+    void UpdateUsageStatus()
+    {
+        var age = Snapshot == null ? "未取得" : "更新 " + Snapshot.FetchedAt.ToLocalTime().ToString("HH:mm:ss");
+        status.Text = Busy ? "更新中…" : failure != null ? failure + (Snapshot != null ? "\n前回値 · " + age : "") : age + "  ·  自動更新 " + RefreshPolicy.Label(Preferences.RefreshSeconds);
+        if (!Busy && nextRefresh > DateTimeOffset.Now) status.Text += $"  ·  次回 {Math.Ceiling((nextRefresh - DateTimeOffset.Now).TotalSeconds):0}秒";
+        if (Snapshot != null && failure == null && DateTimeOffset.Now - Snapshot.FetchedAt > TimeSpan.FromSeconds(Math.Max(60, Preferences.RefreshSeconds * 2))) status.Text += "  ·  前回値";
         if (store.Warning != null) status.Text += "\n" + store.Warning;
         if (backgroundWarning != null) status.Text += "\n" + backgroundWarning;
         if (!testing && ready && tray?.Registered != true) status.Text += "\nトレイ登録に失敗しました。アプリを再起動してください。";

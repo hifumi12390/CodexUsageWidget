@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>CodexUsageWidget</AssemblyName>
-    <Version>1.2.0</Version>
+    <Version>1.3.2</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <DefaultItemExcludes>$(DefaultItemExcludes);tools/**;tests/**;dist/**;research/**</DefaultItemExcludes>

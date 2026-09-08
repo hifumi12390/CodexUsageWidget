@@ -8,6 +8,15 @@ internal static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "--probe-status")
+        {
+            try
+            {
+                var snapshot = new OpenAiStatusProvider().ReadAsync(CancellationToken.None).GetAwaiter().GetResult();
+                File.WriteAllText(args[1], JsonSerializer.Serialize(snapshot)); return 0;
+            }
+            catch (Exception e) { File.WriteAllText(args[1], e.GetType().Name); return 1; }
+        }
         if (args.Length == 2 && args[0] == "--probe")
         {
             try

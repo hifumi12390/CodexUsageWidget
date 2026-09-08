@@ -21,12 +21,21 @@ public sealed class Settings
     public bool ImageBackground { get; set; }
     public bool GlassEnabled { get; set; } = true;
     public bool LowUsageNotifications { get; set; } = true;
+    public int RefreshSeconds { get; set; } = 300;
+    public int ServerRefreshSeconds { get; set; } = 60;
+    public bool ServerStatusExpanded { get; set; }
+    public double? CollapsedHeight { get; set; }
+    public double? ServerExpandedHeight { get; set; }
     public Dictionary<string, AlertStamp> NotificationHistory { get; set; } = new();
     public string? BackgroundImage { get; set; }
     public string? CodexPath { get; set; }
     public void Normalize()
     {
         NotificationHistory ??= new();
+        if (ServerExpandedHeight is double expanded) ServerExpandedHeight = double.IsFinite(expanded) ? Math.Clamp(expanded, 180, 900) : null;
+        if (CollapsedHeight is double collapsed) CollapsedHeight = double.IsFinite(collapsed) ? Math.Clamp(collapsed, 180, 900) : null;
+        if (!RefreshPolicy.UsageChoices.Contains(RefreshSeconds)) RefreshSeconds = 300;
+        if (!RefreshPolicy.ServerChoices.Contains(ServerRefreshSeconds)) ServerRefreshSeconds = 60;
         if (Theme is not ("Dark" or "Light" or "System")) Theme = "Dark";
         Width = double.IsFinite(Width) ? Math.Clamp(Width, 280, 800) : 340;
         Height = double.IsFinite(Height) ? Math.Clamp(Height, 180, 900) : 290;

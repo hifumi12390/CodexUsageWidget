@@ -9,6 +9,17 @@ using System.Windows.Threading;
 namespace CodexUsageWidget;
 internal static class SelfTests
 {
+    sealed class FakeServer : IServerStatusProvider
+    {
+        public bool Fail;
+        public TaskCompletionSource<ServerSnapshot>? Pending;
+        public int Calls;
+        public Task<ServerSnapshot> ReadAsync(CancellationToken token)
+        {
+            Calls++;
+            return Pending?.Task ?? (Fail ? Task.FromException<ServerSnapshot>(new IOException("offline")) : Task.FromResult(new ServerSnapshot("major", [new("Codex API", "major_outage"), new("ChatGPT", "operational")], DateTimeOffset.Now)));
+        }
+    }
     sealed class FakeProvider : IUsageProvider
     {
         public bool Fail;
@@ -41,9 +52,77 @@ internal static class SelfTests
                 Check(odd.FiveHour == null && odd.Credits == null, "unknown duration and null balance remain unavailable");
                 var nullDuration = Parse("""{"rateLimits":{"primary":{"usedPercent":null,"windowDurationMins":null}}}"""); Check(nullDuration.FiveHour == null, "nullable protocol fields accepted");
                 var zero = Parse("""{"rateLimits":{"credits":{"balance":"0","unlimited":false}}}"""); Check(zero.Credits == "0", "actual zero credit retained");
-                var fake = new FakeProvider(); window = new WidgetWindow(store, fake, true); window.Show();
+                var fake = new FakeProvider(); var fakeServer = new FakeServer(); window = new WidgetWindow(store, fake, true, fakeServer); window.Show();
                 await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
                 Check(window.IsVisible && new System.Windows.Interop.WindowInteropHelper(window).Handle != IntPtr.Zero, "native WPF window starts");
+                Check(defaults.RefreshSeconds == 300 && defaults.ServerRefreshSeconds == 60 && !defaults.ServerStatusExpanded, "refresh defaults and collapsed status migrate safely");
+                var timelineHistory = new HealthHistory(); var time = DateTimeOffset.Now;
+                timelineHistory.Append(new("none", [new("API", "operational")], time), time);
+                timelineHistory.Append(new("major", [new("API", "major_outage")], time), time.AddMinutes(1));
+                timelineHistory.Append(null, time.AddMinutes(2));
+                Check(timelineHistory.Summary("API") == "正常 50% · 2回観測", "timeline percentage excludes unobserved samples");
+                Check(HealthHistory.State(timelineHistory.Samples[^1], "API") == "unknown", "failed fetch adds unknown gap to timeline");
+                for (int i = 0; i < 100; i++) timelineHistory.Append(null, time.AddMinutes(i + 3));
+                Check(timelineHistory.Samples.Count == 90 && timelineHistory.Samples[0].Time == time.AddMinutes(13), "timeline advances right and retains exactly 90 samples");
+                Check(StatusTimeline.ColorFor("operational", true) != StatusTimeline.ColorFor("major_outage", true) && StatusTimeline.ColorFor("unknown", true) != StatusTimeline.ColorFor("operational", true), "timeline colors distinguish outages and unknown periods");
+                Check(WidgetWindow.ExpandedHeight(290, 150, 800, 180, 900) == 440 && WidgetWindow.ExpandedHeight(290, 2000, 650, 180, 900) == 650, "expansion fits content and clamps to monitor bottom");
+                using (var doc = JsonDocument.Parse("""{"status":{"indicator":"none"},"components":[{"name":"ChatGPT","status":"operational"},{"name":"Codex","status":"major_outage"}]}"""))
+                {
+                    var parsed = OpenAiStatusProvider.Parse(doc.RootElement);
+                    Check(parsed.HasIncident && parsed.Services[0].Name == "Codex", "component outage overrides healthy summary and sorts first");
+                }
+                Check(new ServiceHealth("API", "partial_outage").IsIncident && new ServiceHealth("API", "degraded_performance").IsIncident && !new ServiceHealth("API", "under_maintenance").IsIncident, "outage and degradation distinct from maintenance");
+                Check(new ServerSnapshot("none", [new("API", "future_state")], DateTimeOffset.Now).Label == "状態不明", "unknown service status is never reported healthy");
+                bool rejectedStatus = false; try { using var doc = JsonDocument.Parse("{}"); OpenAiStatusProvider.Parse(doc.RootElement); } catch (JsonException) { rejectedStatus = true; }
+                Check(rejectedStatus, "malformed status response rejected");
+                foreach (int seconds in RefreshPolicy.UsageChoices)
+                {
+                    window.RefreshItems[seconds].RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                    Check(window.Preferences.RefreshSeconds == seconds && window.ScheduledUsageDelay == TimeSpan.FromSeconds(seconds) && window.RefreshItems.Values.Count(i => i.IsChecked) == 1, "usage interval menu " + seconds);
+                }
+                window.SetRefreshSeconds(15);
+                window.ServerRefreshItems[300].RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                Check(window.Preferences.ServerRefreshSeconds == 300 && window.Preferences.RefreshSeconds == 15, "independent status interval menu");
+                Check(RefreshPolicy.Delay(15, 1) == TimeSpan.FromSeconds(120) && RefreshPolicy.Delay(900, 4) == TimeSpan.FromMinutes(30) && RefreshPolicy.Delay(15, 0) == TimeSpan.FromSeconds(15), "failure backoff bounded and recovers configured interval");
+                window.ServerExpander.IsExpanded = true;
+                await window.RefreshServerAsync();
+                Check(Text(window).Contains("Codex API") && Text(window).Contains("停止中") && window.Preferences.ServerStatusExpanded, "expanded server section renders provider components");
+                var red = (SolidColorBrush)window.ServerHealthBrush(true);
+                Check(red.Color.R > red.Color.G && red.Color.R > red.Color.B, "incident brush uses red in dark mode");
+                var serverPrevious = window.ServerSnapshot;
+                fakeServer.Fail = true; await window.RefreshServerAsync();
+                Check(window.ServerSnapshot == serverPrevious && Text(window).Contains("以下は前回値") && Text(window).Contains("取得失敗"), "server failure retains previous value with explicit failure header");
+                fakeServer.Fail = false; await window.RefreshServerAsync();
+                Check(!Text(window).Contains("以下は前回値"), "server retry clears stale marker");
+                fakeServer.Pending = new(); var pendingServer = window.RefreshServerAsync(); int serverCalls = fakeServer.Calls;
+                await window.RefreshServerAsync();
+                await window.RefreshAsync();
+                Check(fakeServer.Calls == serverCalls && window.Snapshot != null, "overlapping status fetch coalesced and usage remains responsive");
+                fakeServer.Pending.SetResult(serverPrevious!); await pendingServer; fakeServer.Pending = null;
+                window.ServerExpander.IsExpanded = false;
+                window.Height = 290; var foldedHeight = window.Height; var fixedTop = window.Top;
+                window.Preferences.ServerExpandedHeight = null;
+                window.ServerExpander.IsExpanded = true;
+                await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                Check(window.Height > foldedHeight && window.Top == fixedTop, "expansion grows window downward without moving its top");
+                window.Width = 520; window.Height = 640; window.UpdateLayout();
+                await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                await window.RefreshServerAsync();
+                await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                Check(window.Height == 640, "status refresh preserves manually resized expanded height");
+                Capture(window, Path.Combine(output, "server-timeline.png"));
+                window.ServerExpander.IsExpanded = false;
+                Check(window.Height == foldedHeight, "collapse restores original height");
+                window.ServerExpander.IsExpanded = true;
+                await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                Check(window.Height == 640 && window.Width == 520, "reopening restores resized expanded dimensions");
+                window.Persist();
+                var savedRefresh = store.Load();
+                Check(savedRefresh.ServerExpandedHeight == 640, "expanded height persisted to disk");
+                var scoped = new ServerSnapshot("major", new[] { new ServiceHealth("Sora", "major_outage"), new ServiceHealth("ChatGPT", "operational"), new ServiceHealth("Codex API", "operational"), new ServiceHealth("Login", "operational"), new ServiceHealth("Responses", "major_outage") }, DateTimeOffset.Now).ForWidget();
+                Check(scoped.Services.Count == 3 && !scoped.HasIncident, "unrelated API and Sora incidents excluded from widget summary");
+                Check(new StatusTimeline(new HealthHistory(), "ChatGPT", false, false).Height == 12, "compact 12px status bars");
+                Check(savedRefresh.RefreshSeconds == 15 && savedRefresh.ServerRefreshSeconds == 300 && savedRefresh.ServerStatusExpanded, "interval and expansion settings persisted");
                 Check(!window.ShowInTaskbar && defaults.GlassEnabled && defaults.LowUsageNotifications, "tray-only window and new defaults");
                 using (var tray = new TrayIcon(System.Windows.Interop.HwndSource.FromHwnd(new System.Windows.Interop.WindowInteropHelper(window).Handle)!, () => { }, () => { }))
                 { Check(tray.Registered, "Windows Shell accepts tray registration"); tray.Dispose(); Check(!tray.Registered, "tray icon removed on dispose"); }
@@ -90,6 +169,7 @@ internal static class SelfTests
                 window.UsageButtons["5h"].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(Text(window).Contains("26% 使用"), "second click restores used mode");
                 window.ThemeItems["Light"].RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                Check(((SolidColorBrush)window.ServerHealthBrush(true)).Color == Color.FromRgb(178, 25, 40), "light mode uses readable dark red for outages");
                 Check(window.LightTheme && window.Preferences.Theme == "Light" && window.ThemeItems["Light"].IsChecked, "light menu applies and selects theme");
                 Capture(window, Path.Combine(output, "light.png"));
                 window.ThemeItems["System"].RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
@@ -139,7 +219,10 @@ internal static class SelfTests
                 Check(window.Width == 520 && window.Height == 390 && Math.Abs(window.Left - savedLeft) < 2 && Math.Abs(window.Top - savedTop) < 2, "close/reopen restores window geometry");
                 Check(window.Topmost && window.Preferences.ShowCredits && window.Preferences.ImageBackground && window.Preferences.BackgroundImage == savedImage, "close/reopen restores toggles/topmost/background");
                 Check(window.LightTheme && window.Preferences.Theme == "Light" && window.Preferences.WeekRemaining && !window.Preferences.FiveHourRemaining, "theme and per-bar mode survive restart");
+                Check(window.ServerExpander.IsExpanded && window.Preferences.RefreshSeconds == 15 && window.Preferences.ServerRefreshSeconds == 300, "window restart restores expansion and both intervals");
                 Check(!window.Preferences.GlassEnabled && !window.Preferences.LowUsageNotifications, "glass and notification settings survive restart");
+                window.Preferences.ServerStatusExpanded = false; window.ServerExpander.IsExpanded = false;
+                Check(!window.Preferences.ServerStatusExpanded && !window.ServerExpander.IsExpanded, "status section collapses after restoration");
                 await window.RefreshAsync(); Capture(window, Path.Combine(output, "restored.png"));
                 window.Close(); window = null;
                 var saved = store.Load(); Check(store.Save(saved), "settings backup write"); File.WriteAllText(store.FilePath, "{broken");
@@ -148,6 +231,18 @@ internal static class SelfTests
                 Check(invalid.Width == 340 && invalid.Height == 180 && invalid.Left == 80, "invalid geometry normalized");
                 var blocked = Path.Combine(output, "not-a-directory"); File.WriteAllText(blocked, "test");
                 var badStore = new SettingsStore(blocked); Check(!badStore.Save(new()) && badStore.Warning != null, "save failure handled without crash");
+                var timerStore = new SettingsStore(Path.Combine(output, "timer-profile"));
+                timerStore.Save(new Settings { RefreshSeconds = 15, ServerRefreshSeconds = 60, LowUsageNotifications = false });
+                var timerUsage = new FakeProvider(); var timerStatus = new FakeServer();
+                window = new WidgetWindow(timerStore, timerUsage, false, timerStatus); window.Show();
+                await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                int initialCalls = timerUsage.Calls;
+                window.HideToTray();
+                await Task.Delay(TimeSpan.FromSeconds(17));
+                Check(!window.IsVisible && timerUsage.Calls > initialCalls, "real 15-second timer refreshes usage while hidden");
+                Check(timerStatus.Calls == 1, "fast usage timer does not overpoll status API");
+                Check(window.ScheduledUsageDelay == TimeSpan.FromSeconds(15), "successful timed update retains chosen cadence");
+                window.Close(); window = null;
             }
             catch (Exception e) { results.Add("FAIL " + e); exit = 1; }
             finally { window?.Close(); File.WriteAllLines(Path.Combine(output, "results.txt"), results); app.Shutdown(exit); }

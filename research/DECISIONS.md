@@ -29,7 +29,7 @@ Codex CLI 0.153.4で生成したschemaを`research/schema`に保存。公式文�
 
 最初の検証は既存.NET 9 SDKで行い、成果物はProject内の.NET 10.0.400 SDK / Runtime 10.0.11へ移行した。公式メタデータで.NET 10のサポート終了予定2028-11-14を確認。SDK ZIPはMicrosoft公式SHA512との一致を検証した。システムの.NET SDK選択設定は変更しない。
 
-## 実装判断
+## 初回v1.0の実装判断（履歴）
 
 - 5分更新。毎回専用App Serverを起動して取得後終了。待機中の子プロセス常駐を避ける。
 - 失敗時10/20/30分へバックオフ、30秒タイムアウト、手動操作に10秒の連打制限。
@@ -40,3 +40,12 @@ Codex CLI 0.153.4で生成したschemaを`research/schema`に保存。公式文�
 - ポータブル単一EXEとZIP。コード署名や自動更新サーバーは含めない。
 
 出典: [OpenAI App Server](https://learn.chatgpt.com/docs/app-server)、[DWM API](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute)、[.NET 10公式リリース情報](https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json)
+
+## v1.3.2までの判断更新
+
+- v1.2からタスクバー非表示・トレイ常駐。ガラス非対応時は単色へフォールバックする。
+- 利用量は15秒／30秒／1分／5分／15分から選択、初期5分。公式稼働情報は認証不要のStatus APIで別途1分／5分／15分、初期1分で取得する。失敗時は最大30分まで待機を延長する。
+- 定期問い合わせによる準リアルタイム表示とし、サーバー側の即時反映やpushを保証しない。
+- 履歴は起動中の直近90回の実観測のみ。未観測・通信失敗を正常扱いせず、90日間稼働率とは区別する。
+- Codex・ChatGPTの名称を含むサービスとLogin・VS Code extensionに絞る。汎用APIをChatGPTの状態と推定せず、対象外は公式サイトへのリンクから確認する。
+- 展開時の手動調整を情報更新による自動サイズ計算より優先し、折りたたみ時と展開時の高さを保存する。
