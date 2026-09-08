@@ -231,11 +231,76 @@ internal static class SelfTests
                 Check(invalid.Width == 340 && invalid.Height == 180 && invalid.Left == 80, "invalid geometry normalized");
                 var blocked = Path.Combine(output, "not-a-directory"); File.WriteAllText(blocked, "test");
                 var badStore = new SettingsStore(blocked); Check(!badStore.Save(new()) && badStore.Warning != null, "save failure handled without crash");
+                Check(CodexFollowSource.IsCodexExecutable(@"C:\Program Files\WindowsApps\OpenAI.Codex_26_x64\app\ChatGPT.exe"), "follow recognizes installed Codex desktop identity");
+                Check(!CodexFollowSource.IsCodexExecutable(@"C:\Other\ChatGPT.exe") && !CodexFollowSource.IsCodexExecutable(@"C:\OpenAI\Codex\bin\codex-cli.exe"), "follow excludes unrelated app and CLI");
+                var anchor = CodexFollowSource.Anchor(new Rect(-1600, 100, 1200, 900), new Size(420, 435), 1.5);
+                Check(anchor.X == -1588 && anchor.Y == 493, "follow anchor supports negative monitor coordinates and DPI");
+                var migratedFollow = new Settings { FollowWidth = 280 }; migratedFollow.Normalize();
+                Check(migratedFollow.FollowWidth == 220, "old 280 DIP follow default migrates to sidebar width");
+                var followStore = new SettingsStore(Path.Combine(output, "follow-profile"));
+                followStore.Save(new Settings { Left = 80, Top = 90, Width = 400, Height = 300 });
+                var followSource = new FakeFollow();
+                window = new WidgetWindow(followStore, fake, true, fakeServer) { FollowSource = followSource }; window.Show();
+                await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                window.SetFollowMode(true);
+                await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                window.UpdateFollow();
+                Check(window.Preferences.FollowCodex && window.IsVisible && !window.Topmost && !window.ShowInTaskbar, "follow mode shows tray-only overlay above host");
+                Check(WindowBackdrop.NonClientEnabled(window) == false, "follow disables DWM nonclient shadow decoration");
+                Check(window.Persist() && followStore.Load().Left == 80 && followStore.Load().Width == 400, "follow movement does not overwrite desktop geometry");
+                var previousTop = window.Top;
+                followSource.Target = new(new IntPtr(1), new Rect(150, 140, 1000, 700), 1); window.UpdateFollow();
+                Check(window.Top > previousTop, "overlay follows host movement");
+                window.Width = 200; window.Height = 260; window.Persist();
+                await window.RefreshAsync(); window.UpdateLayout();
+                Check(window.MinWidth == 200 && window.ActualWidth == 200, "follow supports narrow 200 DIP layout");
+                Capture(window, Path.Combine(output, "follow.png"));
+                var hostWindow = new Window { Width = 800, Height = 600, ShowActivated = false, ShowInTaskbar = false };
+                var coveringWindow = new Window { Width = 300, Height = 300, ShowActivated = false, ShowInTaskbar = false };
+                try
+                {
+                    hostWindow.Show(); coveringWindow.Show();
+                    var hostHandle = new System.Windows.Interop.WindowInteropHelper(hostWindow).Handle;
+                    var coveringHandle = new System.Windows.Interop.WindowInteropHelper(coveringWindow).Handle;
+                    var widgetHandle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+                    ArrangeWindow(hostHandle, coveringHandle, 0, 0, 0, 0, 0x13);
+                    followSource.Target = new(hostHandle, new Rect(100, 100, 800, 600), 1);
+                    window.UpdateFollow();
+                    results.Add($"INFO z-order host={hostHandle} widget={widgetHandle} cover={coveringHandle} hostPrev={PreviousWindow(hostHandle, 3)} widgetPrev={PreviousWindow(widgetHandle, 3)} topmost={window.Topmost}");
+                    Check(IsAbove(widgetHandle, hostHandle) && IsAbove(coveringHandle, widgetHandle),
+                        "overlay stays above background host but below covering app");
+                    window.UpdateFollow();
+                    Check(IsAbove(widgetHandle, hostHandle) && IsAbove(coveringHandle, widgetHandle),
+                        "repeated follow tick preserves host z-order without promotion");
+                }
+                finally { coveringWindow.Close(); hostWindow.Close(); }
+                followSource.Target = null; window.UpdateFollow();
+                Check(!window.IsVisible && !window.Topmost, "missing or minimized host hides overlay");
+                followSource.Target = new(new IntPtr(1), new Rect(100, 100, 1000, 700), 1); window.UpdateFollow();
+                Check(window.IsVisible, "return to host restores overlay");
+                window.HideToTray(); window.UpdateFollow(); Check(!window.IsVisible, "manual hide is respected by follow timer");
+                window.RestoreFromTray(); Check(window.IsVisible, "tray restore resumes following");
+                window.SetFollowMode(false);
+                await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                Check(window.Left == 80 && window.Top == 90 && window.Width == 400 && window.Height == 300 && !window.Topmost, "normal mode restores desktop bounds and topmost preference");
+                Check(WindowBackdrop.NonClientEnabled(window) == true, "normal mode restores native nonclient rendering");
+                window.SetFollowMode(true); Check(window.Width == 200 && window.Height == 260, "follow mode remembers its own dimensions");
+                window.Close(); window = new WidgetWindow(followStore, fake, true, fakeServer) { FollowSource = followSource }; window.Show();
+                await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                Check(window.Preferences.FollowCodex && window.Width == 200 && window.Height == 260 && window.IsVisible, "follow preference and geometry survive restart");
+                window.Close(); window = null;
                 var timerStore = new SettingsStore(Path.Combine(output, "timer-profile"));
                 timerStore.Save(new Settings { RefreshSeconds = 15, ServerRefreshSeconds = 60, LowUsageNotifications = false });
                 var timerUsage = new FakeProvider(); var timerStatus = new FakeServer();
                 window = new WidgetWindow(timerStore, timerUsage, false, timerStatus); window.Show();
                 await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                var timedFollow = new FakeFollow(); window.FollowSource = timedFollow; window.SetFollowMode(true);
+                await Task.Delay(350);
+                Check(window.IsVisible && !window.ShowActivated, "real follow timer shows without activating overlay");
+                timedFollow.Target = null; await Task.Delay(350);
+                Check(!window.IsVisible, "real follow timer hides when host becomes unavailable");
+                timedFollow.Target = new(new IntPtr(1), new Rect(100, 100, 1000, 700), 1); await Task.Delay(350);
+                Check(window.IsVisible, "real follow timer restores when host returns");
                 int initialCalls = timerUsage.Calls;
                 window.HideToTray();
                 await Task.Delay(TimeSpan.FromSeconds(17));
@@ -248,6 +313,22 @@ internal static class SelfTests
             finally { window?.Close(); File.WriteAllLines(Path.Combine(output, "results.txt"), results); app.Shutdown(exit); }
         };
         app.Run(); return exit;
+    }
+    sealed class FakeFollow : IFollowSource
+    {
+        internal FollowTarget? Target = new(new IntPtr(1), new Rect(100, 100, 1000, 700), 1);
+        public FollowTarget? Read(IntPtr widget) => Target;
+    }
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SetWindowPos")]
+    static extern bool ArrangeWindow(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindow")]
+    static extern IntPtr PreviousWindow(IntPtr window, uint command);
+    static bool IsAbove(IntPtr candidate, IntPtr window)
+    {
+        // Native z-order includes hidden WPF/IME helper windows between visible windows.
+        for (int i = 0; i < 1000 && window != IntPtr.Zero; i++)
+        { window = PreviousWindow(window, 3); if (window == candidate) return true; }
+        return false;
     }
     static string Text(DependencyObject root)
     {

@@ -15,6 +15,10 @@ public sealed class Settings
     public bool ShowReset { get; set; } = true;
     public bool ShowCredits { get; set; }
     public bool AlwaysOnTop { get; set; }
+    public bool FollowCodex { get; set; }
+    public double FollowWidth { get; set; } = 220;
+    public int FollowLayoutVersion { get; set; } = 1;
+    public double FollowHeight { get; set; } = 290;
     public string Theme { get; set; } = "Dark";
     public bool FiveHourRemaining { get; set; }
     public bool WeekRemaining { get; set; }
@@ -32,6 +36,11 @@ public sealed class Settings
     public void Normalize()
     {
         NotificationHistory ??= new();
+        // The old layout default (280) overflows the narrow Codex sidebar.
+        if (FollowLayoutVersion < 2 && FollowWidth == 280) FollowWidth = 220;
+        FollowLayoutVersion = 2;
+        FollowWidth = double.IsFinite(FollowWidth) ? Math.Clamp(FollowWidth, 200, 800) : 220;
+        FollowHeight = double.IsFinite(FollowHeight) ? Math.Clamp(FollowHeight, 180, 900) : 290;
         if (ServerExpandedHeight is double expanded) ServerExpandedHeight = double.IsFinite(expanded) ? Math.Clamp(expanded, 180, 900) : null;
         if (CollapsedHeight is double collapsed) CollapsedHeight = double.IsFinite(collapsed) ? Math.Clamp(collapsed, 180, 900) : null;
         if (!RefreshPolicy.UsageChoices.Contains(RefreshSeconds)) RefreshSeconds = 300;

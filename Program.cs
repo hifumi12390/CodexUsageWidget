@@ -8,6 +8,10 @@ internal static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "--probe-follow")
+        {
+            File.WriteAllText(args[1], JsonSerializer.Serialize(new { Found = new CodexFollowSource().Read(IntPtr.Zero) != null })); return 0;
+        }
         if (args.Length == 2 && args[0] == "--probe-status")
         {
             try

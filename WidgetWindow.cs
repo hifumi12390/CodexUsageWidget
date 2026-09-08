@@ -25,6 +25,7 @@ public sealed partial class WidgetWindow : Window
     readonly TextBlock status = new();
     readonly TextBlock pin = new();
     readonly Grid surface = new();
+    readonly Grid layout = new();
     readonly Border tint = new();
     readonly Image backdrop = new() { Stretch = Stretch.UniformToFill };
     readonly Button refresh;
@@ -67,21 +68,21 @@ public sealed partial class WidgetWindow : Window
         this.serverProvider = serverProvider ?? new OpenAiStatusProvider();
         refreshTimer.Interval = TimeSpan.FromSeconds(Preferences.RefreshSeconds);
         Title = "Codex Usage Widget";
-        ShowActivated = !testing;
+        ShowActivated = !testing && !Preferences.FollowCodex;
         ShowInTaskbar = false;
-        Width = Preferences.Width; Height = Preferences.Height;
-        MinWidth = 280; MinHeight = 180; MaxWidth = 800; MaxHeight = 900;
+        Width = Preferences.FollowCodex ? Preferences.FollowWidth : Preferences.Width; Height = Preferences.FollowCodex ? Preferences.FollowHeight : Preferences.Height;
+        MinWidth = Preferences.FollowCodex ? 200 : 280; MinHeight = 180; MaxWidth = 800; MaxHeight = 900;
         Left = Preferences.Left; Top = Preferences.Top;
         WindowStartupLocation = WindowStartupLocation.Manual; WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.CanResize; Background = Brushes.Transparent;
         Foreground = White; FontFamily = new FontFamily("Segoe UI, Yu Gothic UI"); FontSize = 12;
-        Topmost = Preferences.AlwaysOnTop;
+        Topmost = !Preferences.FollowCodex && Preferences.AlwaysOnTop;
         WindowChrome.SetWindowChrome(this, new WindowChrome { CaptionHeight = 0, ResizeBorderThickness = new Thickness(6), GlassFrameThickness = new Thickness(-1), CornerRadius = new CornerRadius(16), UseAeroCaptionButtons = false });
         surface.Children.Add(backdrop); surface.Children.Add(tint);
         var outline = new Border { BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(15), IsHitTestVisible = false };
         outline.SetResourceReference(Border.BorderBrushProperty, "WidgetBorder");
         surface.Children.Add(outline);
-        var layout = new Grid { Margin = new Thickness(20, 14, 20, 14) };
+        layout.Margin = new Thickness(20, 14, 20, 14);
         layout.RowDefinitions.Add(new() { Height = GridLength.Auto });
         layout.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
         layout.RowDefinitions.Add(new() { Height = GridLength.Auto });
@@ -95,7 +96,7 @@ public sealed partial class WidgetWindow : Window
         brand.Children.Add(new TextBlock { Text = "CODEX", FontWeight = FontWeights.SemiBold, FontSize = 13, VerticalAlignment = VerticalAlignment.Center });
         pin.Text = "  • PIN"; pin.FontSize = 10; pin.Foreground = Mint; pin.VerticalAlignment = VerticalAlignment.Center;
         brand.Children.Add(pin); header.Children.Add(brand);
-        header.MouseLeftButtonDown += (_, e) => { if (e.OriginalSource is not Button) { try { DragMove(); } catch (InvalidOperationException) { } } };
+        header.MouseLeftButtonDown += (_, e) => { if (!Preferences.FollowCodex && e.OriginalSource is not Button) { try { DragMove(); } catch (InvalidOperationException) { } } };
         var actions = new StackPanel { Orientation = Orientation.Horizontal };
         refresh = MakeButton("↻", "今すぐ更新 (F5)", async () => await RefreshAsync());
         actions.Children.Add(refresh);
@@ -115,12 +116,13 @@ public sealed partial class WidgetWindow : Window
         refreshMenu = Item("今すぐ更新    F5", async () => await RefreshAsync());
         ContextMenu.Items.Add(refreshMenu); ContextMenu.Items.Add(new Separator());
         AddRefreshSettings();
+        InitializeFollow();
         Toggle("5h", "5h を表示", () => Preferences.ShowFiveHour, v => Preferences.ShowFiveHour = v);
         Toggle("Week", "Week を表示", () => Preferences.ShowWeek, v => Preferences.ShowWeek = v);
         Toggle("Reset", "Reset時刻を表示", () => Preferences.ShowReset, v => Preferences.ShowReset = v);
         Toggle("Credits", "Codex Credits を表示", () => Preferences.ShowCredits, v => Preferences.ShowCredits = v);
         ContextMenu.Items.Add(new Separator());
-        Toggle("Topmost", "常時最前面", () => Preferences.AlwaysOnTop, v => { Preferences.AlwaysOnTop = v; Topmost = v; });
+        Toggle("Topmost", "常時最前面", () => Preferences.AlwaysOnTop, v => { Preferences.AlwaysOnTop = v; if (!Preferences.FollowCodex) Topmost = v; });
         Toggle("Notifications", "残量5%未満でWindows通知", () => Preferences.LowUsageNotifications, v => Preferences.LowUsageNotifications = v);
         ContextMenu.Items.Add(Item("通知をテスト", () => SendNotification("Codex Usage Widget", "テスト通知です。残量5%未満の通知は設定でON/OFFできます。")));
         var themes = new MenuItem { Header = "テーマ" };
@@ -142,7 +144,7 @@ public sealed partial class WidgetWindow : Window
         connection.Items.Add(Item("codex.exe を選択…", () => { var d = new OpenFileDialog { Title = "Codex実行ファイルを選択", Filter = "Codex executable|codex.exe", CheckFileExists = true }; if (d.ShowDialog(this) == true) { Preferences.CodexPath = d.FileName; Snapshot = null; Persist(); _ = RefreshAsync(); } }));
         connection.Items.Add(Item("実行ファイルを自動検出", () => { Preferences.CodexPath = null; Snapshot = null; Persist(); _ = RefreshAsync(); }));
         ContextMenu.Items.Add(connection);
-        ContextMenu.Items.Add(Item("このアプリについて", () => MessageBox.Show(this, "Codex Usage Widget 1.3\n\nバーを左クリックすると使用率／残量を切り替えます。\n5hとWeekの表示モードは個別に保存します。\nテーマ: ダーク／ライト／システムと同期。\n設定した間隔で自動更新。最短15秒の高速更新に対応。失敗時は最大30分まで間隔を延長します。\nResetはWindowsの現地時刻です。\nCreditsは追加利用残高で、利用枠リセット券とは別です。\n\n上部をドラッグして移動、端をドラッグしてリサイズ。\n右クリックまたは Shift+F10 で設定。\n\nログイン済みのCodexが必要です。認証管理はCodexに任せ、ウィジェットは認証情報を保存しません。\n\n設定: " + store.FilePath, "Codex Usage Widget", MessageBoxButton.OK, MessageBoxImage.Information)));
+        ContextMenu.Items.Add(Item("このアプリについて", () => MessageBox.Show(this, "Codex Usage Widget 1.4.1\n\nバーを左クリックすると使用率／残量を切り替えます。\n5hとWeekの表示モードは個別に保存します。\nテーマ: ダーク／ライト／システムと同期。\n設定した間隔で自動更新。最短15秒の高速更新に対応。失敗時は最大30分まで間隔を延長します。\nResetはWindowsの現地時刻です。\nCreditsは追加利用残高で、利用枠リセット券とは別です。\n\n上部をドラッグして移動、端をドラッグしてリサイズ。\n右クリックまたは Shift+F10 で設定。\n\nログイン済みのCodexが必要です。認証管理はCodexに任せ、ウィジェットは認証情報を保存しません。\n\n設定: " + store.FilePath, "Codex Usage Widget", MessageBoxButton.OK, MessageBoxImage.Information)));
         ContextMenu.Items.Add(new Separator());
         ContextMenu.Items.Add(Item("ウィジェットを隠す", HideToTray));
         ContextMenu.Items.Add(Item("終了", Close));
@@ -150,8 +152,8 @@ public sealed partial class WidgetWindow : Window
         saveTimer.Tick += (_, _) => { saveTimer.Stop(); Persist(); };
         refreshTimer.Tick += async (_, _) => await RefreshAsync(false);
         clockTimer.Tick += (_, _) => UpdateUsageStatus();
-        LocationChanged += (_, _) => QueueSave();
-        SizeChanged += (_, e) => { surface.Clip = new RectangleGeometry(new Rect(0, 0, ActualWidth, ActualHeight), 15, 15); RememberServerSize(); if (e.WidthChanged) QueueServerResize(); QueueSave(); };
+        LocationChanged += (_, _) => { if (!Preferences.FollowCodex) QueueSave(); };
+        SizeChanged += (_, e) => { surface.Clip = new RectangleGeometry(new Rect(0, 0, ActualWidth, ActualHeight), 15, 15); CompactLayout(); RememberServerSize(); if (e.WidthChanged) QueueServerResize(); if (Preferences.FollowCodex) QueueBackdrop(); QueueSave(); };
         SourceInitialized += (_, _) =>
         {
             windowSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
@@ -159,9 +161,9 @@ public sealed partial class WidgetWindow : Window
             if (!testing && windowSource != null) tray = new TrayIcon(windowSource, RestoreFromTray, OpenTrayMenu);
             KeepOnScreen(); ApplyBackground();
         };
-        Loaded += async (_, _) => { ready = true; QueueBackdrop(); Render(); if (!testing) { Persist(); clockTimer.Start(); await RefreshAsync(); } };
+        Loaded += async (_, _) => { ready = true; QueueBackdrop(); Render(); StartFollow(); if (!testing) { Persist(); clockTimer.Start(); await RefreshAsync(); } };
         StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) HideToTray(); };
-        Closing += (_, _) => { Persist(); closed = true; lifetime.Cancel(); refreshTimer.Stop(); serverTimer.Stop(); clockTimer.Stop(); saveTimer.Stop(); };
+        Closing += (_, _) => { Persist(); closed = true; lifetime.Cancel(); followTimer.Stop(); refreshTimer.Stop(); serverTimer.Stop(); clockTimer.Stop(); saveTimer.Stop(); };
         SystemEvents.DisplaySettingsChanged += DisplayChanged;
         SystemEvents.UserPreferenceChanged += SystemThemeChanged;
         Activated += (_, _) => { if (Preferences.Theme == "System") RefreshSystemTheme(); QueueBackdrop(); };
@@ -184,11 +186,13 @@ public sealed partial class WidgetWindow : Window
     internal void HideToTray()
     {
         if (!testing && tray?.Registered != true) return;
-        Persist(); Hide();
+        followHiddenByUser = true; Persist(); Hide();
     }
     internal void RestoreFromTray()
     {
         if (closed) return;
+        followHiddenByUser = false;
+        if (Preferences.FollowCodex) { UpdateFollow(); return; }
         Show(); WindowState = WindowState.Normal; Activate(); QueueBackdrop();
     }
     void OpenTrayMenu()
@@ -197,6 +201,8 @@ public sealed partial class WidgetWindow : Window
         trayMenu.Items.Add(Item("ウィジェットを表示", RestoreFromTray));
         trayMenu.Items.Add(Item("ウィジェットを隠す", HideToTray));
         trayMenu.Items.Add(new Separator());
+        var follow = new MenuItem { Header = "Codexに追従（左下・影なし）", IsCheckable = true, IsChecked = Preferences.FollowCodex };
+        follow.Click += (_, _) => SetFollowMode(follow.IsChecked); trayMenu.Items.Add(follow);
         trayMenu.Items.Add(Item("今すぐ更新", async () => await RefreshAsync()));
         var notification = new MenuItem { Header = "残量5%未満でWindows通知", IsCheckable = true, IsChecked = Preferences.LowUsageNotifications };
         notification.Click += (_, _) => { Preferences.LowUsageNotifications = notification.IsChecked; Toggles["Notifications"].IsChecked = notification.IsChecked; Persist(); };
@@ -271,7 +277,7 @@ public sealed partial class WidgetWindow : Window
             { backgroundWarning = "背景画像を読み込めないため標準背景を表示中。"; }
         }
         bool image = backdrop.Source != null;
-        BackdropState = WindowBackdrop.Apply(this, Preferences.GlassEnabled, image, LightTheme);
+        BackdropState = WindowBackdrop.Apply(this, Preferences.GlassEnabled, image, LightTheme, Preferences.FollowCodex);
         bool acrylic = BackdropState.GlassActive;
         if (Preferences.GlassEnabled && !image && !acrylic) backgroundWarning ??= "この環境ではガラス効果を適用できないため単色表示中。";
         tint.Background = LightTheme
@@ -306,7 +312,10 @@ public sealed partial class WidgetWindow : Window
     }
     internal void Render()
     {
-        rows.Children.Clear(); UsageButtons.Clear(); pin.Visibility = Preferences.AlwaysOnTop ? Visibility.Visible : Visibility.Collapsed;
+        rows.Children.Clear(); UsageButtons.Clear(); pin.Text = Preferences.FollowCodex ? "  • FOLLOW" : "  • PIN";
+        pin.Visibility = Preferences.FollowCodex || Preferences.AlwaysOnTop ? Visibility.Visible : Visibility.Collapsed;
+        Toggles["Topmost"].IsEnabled = !Preferences.FollowCodex;
+        CompactLayout();
         if (Preferences.ShowFiveHour) UsageRow("5h", Snapshot?.FiveHour, Mint);
         if (Preferences.ShowWeek) UsageRow("Week", Snapshot?.Week, ColorResource("WidgetWeek"));
         if (Preferences.ShowReset)
@@ -372,7 +381,11 @@ public sealed partial class WidgetWindow : Window
     void QueueSave() { if (ready && WindowState == WindowState.Normal) { saveTimer.Stop(); saveTimer.Start(); } }
     internal bool Persist()
     {
-        if (WindowState == WindowState.Normal) { Preferences.Left = Left; Preferences.Top = Top; Preferences.Width = Width; Preferences.Height = Height; }
+        if (WindowState == WindowState.Normal)
+        {
+            if (Preferences.FollowCodex) { Preferences.FollowWidth = Width; Preferences.FollowHeight = Height; }
+            else { Preferences.Left = Left; Preferences.Top = Top; Preferences.Width = Width; Preferences.Height = Height; }
+        }
         var ok = store.Save(Preferences); if (ready && !closed) Render(); return ok;
     }
     void KeepOnScreen()
