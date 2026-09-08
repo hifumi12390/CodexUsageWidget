@@ -1,0 +1,29 @@
+bin/
+obj/
+dist/
+tools/
+.vs/
+*.user
+*.suo
+*.log
+*.tmp
+*.dmp
+
+# Local test output and user-generated fixtures
+tests/**
+!tests/.gitkeep
+
+# Research exports are not needed to build or run the app
+research/schema/
+research/probe.cjs
+
+# Per-user application state (stored outside the repository in normal use)
+settings.json
+settings.json.bak
+background-*.png
+.env
+.env.*
+
+# OS/editor files
+.DS_Store
+Thumbs.db
